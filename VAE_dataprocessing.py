@@ -5,7 +5,24 @@ def load_and_trim_data(df, dmi_df, imbalance_df):
     """
     Loads and trims the datasets to ensure consistent lengths.
     Converts total generation from MW to GW and imbalance from MWh to GWh.
+    Additionally, filters out rows beyond 05-01-2025 (i.e. after 05-01-2025 23:59)
+    based on the imbalance settlement period.
     """
+    # --- Filter data based on settlement date ---
+    if "Imbalance settlement period CET/CEST" in imbalance_df.columns:
+        # Extract start datetime from the settlement period string (format: "dd.mm.yyyy HH:MM - dd.mm.yyyy HH:MM")
+        imbalance_df['start_datetime'] = pd.to_datetime(
+            imbalance_df["Imbalance settlement period CET/CEST"].str.split(" - ").str[0],
+            format="%d.%m.%Y %H:%M"
+        )
+        cutoff = pd.to_datetime("05.01.2025 23:59", format="%d.%m.%Y %H:%M")
+        mask = imbalance_df['start_datetime'] <= cutoff
+        # Apply the same mask to the other datasets assuming rows are aligned
+        df = df[mask].reset_index(drop=True)
+        dmi_df = dmi_df[mask].reset_index(drop=True)
+        imbalance_df = imbalance_df[mask].reset_index(drop=True)
+    
+    # --- Process generation data ---
     numerical_columns = df.columns[2:]
     for col in numerical_columns:
         df[col] = pd.to_numeric(df[col].replace('n/e', 0), errors='coerce').fillna(0)
@@ -16,23 +33,20 @@ def load_and_trim_data(df, dmi_df, imbalance_df):
     # Convert production from MW to GW (1 MW = 0.001 GW)
     df['Total Generation [GW]'] = df['Total Generation [MW]'] * 0.001
 
-    # Process imbalance data: convert 'n/e' to 0 and make numeric
+    # --- Process imbalance data ---
     imbalance_df['Total Imbalance [MWh] - IBA|DK2'] = pd.to_numeric(
         imbalance_df['Total Imbalance [MWh] - IBA|DK2'].replace('n/e', 0), errors='coerce'
     ).fillna(0)
     
     # Adjust sign based on "Deficit" or "Surplus"
     imbalance_df['Total Imbalance [MWh] - IBA|DK2'] = imbalance_df.apply(
-        lambda row: -row['Total Imbalance [MWh] - IBA|DK2'] if row['Situation'] == 'Deficit' else row['Total Imbalance [MWh] - IBA|DK2'],
+        lambda row: -row['Total Imbalance [MWh] - IBA|DK2'] if row['Situation'] == 'Deficit' 
+                    else row['Total Imbalance [MWh] - IBA|DK2'],
         axis=1
     )
     
     # Convert imbalance from MWh to GWh (1 MWh = 0.001 GWh)
     imbalance_df['Total Imbalance [GWh] - IBA|DK2'] = imbalance_df['Total Imbalance [MWh] - IBA|DK2'] * 0.001
-
-    # Filter only the data from 2025 onwards
-    # dmi_df['Datetime'] = pd.to_datetime(dmi_df['Datetime'])
-    # dmi_df = dmi_df[dmi_df['Datetime'] >= "2025-01-01"]
 
     total_generation = df['Total Generation [GW]'].values
     mean_temp = dmi_df['mean_temp'].values
