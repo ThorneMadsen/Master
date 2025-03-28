@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import numpy as np
 
 class TransformerEncoder(nn.Module):
     def __init__(self, cond_dim, target_dim, latent_dim, nhead=8, num_layers=3):
@@ -100,6 +101,51 @@ def loss_function(recon_target, target, mu, logvar, kl_weight=1.0):
     recon_loss = F.mse_loss(recon_target, target, reduction='mean')
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_weight * kl_loss
+
+def calculate_kl_weight(epoch, total_epochs, warmup_epochs, min_weight=0.0, max_weight=1.0, schedule_type='linear'):
+    """
+    Calculate the KL weight based on annealing schedule.
+    
+    Args:
+        epoch (int): Current epoch
+        total_epochs (int): Total number of epochs for training
+        warmup_epochs (int): Number of epochs to reach max_weight
+        min_weight (float): Minimum KL weight at the beginning
+        max_weight (float): Maximum KL weight after warmup
+        schedule_type (str): Type of schedule ('linear', 'sigmoid', or 'cyclical')
+        
+    Returns:
+        float: Current KL weight
+    """
+    if schedule_type == 'linear':
+        # Linear annealing from min_weight to max_weight
+        return min_weight + (max_weight - min_weight) * min(1.0, epoch / warmup_epochs)
+    
+    elif schedule_type == 'sigmoid':
+        # Sigmoid annealing for smoother transition
+        if warmup_epochs > 0:
+            ratio = epoch / warmup_epochs
+            return min_weight + (max_weight - min_weight) * (1 / (1 + np.exp(-10 * (ratio - 0.5))))
+        else:
+            return max_weight
+    
+    elif schedule_type == 'cyclical':
+        # Cyclical annealing with a cycle length of 2*warmup_epochs
+        if warmup_epochs > 0:
+            cycle_length = 2 * warmup_epochs
+            cycle = (epoch % cycle_length) / cycle_length
+            if cycle < 0.5:
+                # Increasing part of the cycle
+                return min_weight + (max_weight - min_weight) * (2 * cycle)
+            else:
+                # Keep at max for the second half of the cycle
+                return max_weight
+        else:
+            return max_weight
+    
+    else:
+        # Default to constant max weight
+        return max_weight
 
 def train_epoch(model, train_loader, optimizer, device, kl_weight=1.0):
     """
