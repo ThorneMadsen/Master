@@ -1,112 +1,130 @@
 import numpy as np
 import pandas as pd
 
-def load_and_trim_data(df, dmi_df, imbalance_df):
-    """
-    Loads and trims the datasets to ensure consistent lengths.
-    Converts total generation from MW to GW and imbalance from MWh to GWh.
-    Additionally, filters out rows beyond 05-01-2025 (i.e. after 05-01-2025 23:59)
-    based on the imbalance settlement period.
-    """
-    # --- Filter data based on settlement date ---
-    if "Imbalance settlement period CET/CEST" in imbalance_df.columns:
-        # Extract start datetime from the settlement period string (format: "dd.mm.yyyy HH:MM - dd.mm.yyyy HH:MM")
-        imbalance_df['start_datetime'] = pd.to_datetime(
-            imbalance_df["Imbalance settlement period CET/CEST"].str.split(" - ").str[0],
-            format="%d.%m.%Y %H:%M"
-        )
-        cutoff = pd.to_datetime("05.01.2025 23:59", format="%d.%m.%Y %H:%M")
-        mask = imbalance_df['start_datetime'] <= cutoff
-        # Apply the same mask to the other datasets assuming rows are aligned
-        df = df[mask].reset_index(drop=True)
-        dmi_df = dmi_df[mask].reset_index(drop=True)
-        imbalance_df = imbalance_df[mask].reset_index(drop=True)
+def load_and_process_data():
+    """Load and process aFRR and DMI data, returning aligned feature arrays."""
+    # Load data
+    afrr_df = pd.read_csv("data/afrr_activated_dk2_2023_today.csv")
+    dmi_df = pd.read_csv("data/DMI_data.csv")
     
-    # --- Process generation data ---
-    numerical_columns = df.columns[2:]
-    for col in numerical_columns:
-        df[col] = pd.to_numeric(df[col].replace('n/e', 0), errors='coerce').fillna(0)
-
-    # Sum all numerical columns to get total generation in MW
-    df['Total Generation [MW]'] = df[numerical_columns].sum(axis=1)
+    # Convert timestamps and filter 2022 data
+    afrr_df['timestamp'] = pd.to_datetime(afrr_df['HourUTC'], utc=True)
+    afrr_df = afrr_df[afrr_df['timestamp'].dt.year >= 2023]
     
-    # Convert production from MW to GW (1 MW = 0.001 GW)
-    df['Total Generation [GW]'] = df['Total Generation [MW]'] * 0.001
-
-    # --- Process imbalance data ---
-    imbalance_df['Total Imbalance [MWh] - IBA|DK2'] = pd.to_numeric(
-        imbalance_df['Total Imbalance [MWh] - IBA|DK2'].replace('n/e', 0), errors='coerce'
-    ).fillna(0)
+    # Calculate net aFRR (up - down)
+    afrr_df['aFRR_Net_Quantity_MW'] = afrr_df['aFRR_UpActivated'] - afrr_df['aFRR_DownActivated']
     
-    # Adjust sign based on "Deficit" or "Surplus"
-    imbalance_df['Total Imbalance [MWh] - IBA|DK2'] = imbalance_df.apply(
-        lambda row: -row['Total Imbalance [MWh] - IBA|DK2'] if row['Situation'] == 'Deficit' 
-                    else row['Total Imbalance [MWh] - IBA|DK2'],
-        axis=1
+    # Convert DMI timestamp to UTC
+    dmi_df['timestamp'] = pd.to_datetime(dmi_df.iloc[:, 0], utc=True)
+    
+    # Merge data
+    merged_df = pd.merge(
+        afrr_df[['timestamp', 'aFRR_Net_Quantity_MW']],
+        dmi_df[['timestamp', 'mean_temp', 'mean_wind_speed']],
+        on='timestamp',
+        how='inner'
     )
     
-    # Convert imbalance from MWh to GWh (1 MWh = 0.001 GWh)
-    imbalance_df['Total Imbalance [GWh] - IBA|DK2'] = imbalance_df['Total Imbalance [MWh] - IBA|DK2'] * 0.001
+    # Sort 
+    merged_df = merged_df.sort_values('timestamp')
 
-    total_generation = df['Total Generation [GW]'].values
-    mean_temp = dmi_df['mean_temp'].values
-    mean_wind_speed = dmi_df['mean_wind_speed'].values
-    imbalance = imbalance_df['Total Imbalance [GWh] - IBA|DK2'].values
+    # --- Fill Gaps ---
+    if not merged_df.empty:
+        print(f"\nData before gap filling - Min: {merged_df['timestamp'].min()}, Max: {merged_df['timestamp'].max()}, Length: {len(merged_df)}")
+        # Create a full hourly range
+        full_range = pd.date_range(start=merged_df['timestamp'].min(), end=merged_df['timestamp'].max(), freq='H', tz='UTC')
+        # Set timestamp as index for reindexing
+        merged_df = merged_df.set_index('timestamp')
+        # Reindex to fill gaps (introduces NaNs)
+        merged_df = merged_df.reindex(full_range)
+        # Forward fill NaNs, then backward fill any remaining at the start
+        merged_df = merged_df.fillna(method='ffill').fillna(method='bfill')
+        # Reset index to get timestamp column back
+        merged_df = merged_df.reset_index().rename(columns={'index': 'timestamp'})
+        print(f"Data after gap filling - Min: {merged_df['timestamp'].min()}, Max: {merged_df['timestamp'].max()}, Length: {len(merged_df)}")
+    # --- End Gap Filling ---
+
+    # Ensure data starts exactly at midnight UTC
+    first_midnight_index = merged_df[merged_df['timestamp'].dt.hour == 0].index.min()
+    if pd.isna(first_midnight_index):
+        print("Error: No midnight timestamp found in merged data. Cannot proceed.")
+        # Return empty arrays to prevent errors later
+        return np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
     
-    print("Total Generation:", total_generation.shape)
-    print("Mean Temperature:", mean_temp.shape)
-    print("Mean Wind Speed:", mean_wind_speed.shape)
-    print("Imbalance:", imbalance.shape)
-    min_length = min(len(total_generation), len(mean_temp), len(mean_wind_speed), len(imbalance))
-    
+    merged_df = merged_df.loc[first_midnight_index:].reset_index(drop=True)
+    print(f"Filtered merged data to start from first midnight ({merged_df.iloc[0]['timestamp']}). New shape: {merged_df.shape}")
+
+    # --- Truncate to full days ---
+    num_full_days = len(merged_df) // 24
+    rows_to_keep = num_full_days * 24
+    if rows_to_keep < len(merged_df):
+        merged_df = merged_df.iloc[:rows_to_keep]
+        print(f"Truncated data to {rows_to_keep} rows ({num_full_days} full days). Last timestamp: {merged_df.iloc[-1]['timestamp']}")
+    # --- End Truncation ---
+
+    # Extract arrays
     return (
-        total_generation[:min_length],
-        mean_temp[:min_length],
-        mean_wind_speed[:min_length],
-        imbalance[:min_length]
+        merged_df['aFRR_Net_Quantity_MW'].values,
+        merged_df['mean_temp'].values,
+        merged_df['mean_wind_speed'].values,
+        merged_df['timestamp']
     )
 
-def create_sequences(total_generation, mean_temp, mean_wind_speed, imbalance, seq_length=24):
-    """
-    Creates sequences where X contains seq_length hours of:
-      - Total Generation (in GW)
-      - Mean Temperature
-      - Mean Wind Speed
-      - Imbalance (in GWh)
-      
-    Returns X with shape (n_days, 4, seq_length).
-    """
+def create_sequences(afrr, temp, wind, timestamps, seq_length=24):
+    """Create 24-hour sequences with features plus day sin/cos."""
     X = []
-    # Step through the data in increments of seq_length (one day)
-    for i in range(0, len(total_generation) - seq_length + 1, seq_length):
+    total_length = len(afrr)
+    
+    for i in range(0, total_length - seq_length + 1, seq_length):
+        # Get first timestamp of sequence for day sin/cos
+        first_timestamp = timestamps.iloc[i]
+        day_of_year = first_timestamp.dayofyear
+        days_in_year = 366.0 if first_timestamp.is_leap_year else 365.0
+        day_angle = (day_of_year / days_in_year) * 2 * np.pi
+        
+        # Create sequence
         X_seq = np.stack([
-            total_generation[i:i+seq_length],
-            mean_temp[i:i+seq_length],
-            mean_wind_speed[i:i+seq_length],
-            imbalance[i:i+seq_length]
+            afrr[i:i+seq_length],
+            temp[i:i+seq_length],
+            wind[i:i+seq_length],
+            np.full(seq_length, np.sin(day_angle)),
+            np.full(seq_length, np.cos(day_angle))
         ], axis=0)
         X.append(X_seq)
+    
     return np.array(X)
 
 if __name__ == "__main__":
-    # Load the datasets
-    generation_df_2023 = pd.read_csv("data/Actual Generation per Production Type_DK2_2023.csv")
-    generation_df_2024 = pd.read_csv("data/Actual Generation per Production Type_DK2_2024.csv")
-    generation_df_2025 = pd.read_csv("data/Actual Generation per Production Type_DK2_2025.csv")
-    df = pd.concat([generation_df_2023, generation_df_2024, generation_df_2025])
+    # Load and process data
+    afrr, temp, wind, timestamps = load_and_process_data()
 
-    imbalance_df_2023 = pd.read_csv("data/Imbalance_DK2_2023.csv")
-    imbalance_df_2024 = pd.read_csv("data/Imbalance_DK2_2024.csv")
-    imbalance_df_2025 = pd.read_csv("data/Imbalance_DK2_2025.csv")
-    imbalance_df = pd.concat([imbalance_df_2023, imbalance_df_2024, imbalance_df_2025])
+    # --- Diagnostics ---
+    if timestamps.empty:
+        print("Processing resulted in empty data. Cannot create sequences.")
+    else:
+        print("\n--- Timestamp Diagnostics (after midnight filter) ---")
+        print(f"Total hours available: {len(timestamps)}")
+        print(f"Is total hours divisible by 24? {'Yes' if len(timestamps) % 24 == 0 else 'No'}")
+        print(f"First 5 timestamps:\n{timestamps.head()}")
+        print(f"Last 5 timestamps:\n{timestamps.tail()}")
 
-    dmi_df = pd.read_csv("data/DMI_data.csv")
-    print(df.tail())
-    print(imbalance_df.tail())
-    
-    total_generation, mean_temp, mean_wind_speed, imbalance = load_and_trim_data(df, dmi_df, imbalance_df)
-    X = create_sequences(total_generation, mean_temp, mean_wind_speed, imbalance, seq_length=24)
-    
-    np.save("data/X.npy", X)
-    
-    print("Processed data saved: X.npy with shape", X.shape)
+        # Check for gaps (difference between consecutive timestamps should be 1 hour)
+        time_diffs = timestamps.diff().iloc[1:]
+        expected_diff = pd.Timedelta(hours=1)
+        gaps = time_diffs[time_diffs != expected_diff]
+        if not gaps.empty:
+            print(f"\nWarning: Found {len(gaps)} timestamp gaps (expected 1 hour difference):")
+            print(gaps)
+        else:
+            print("\nNo timestamp gaps found.")
+        # --- End Diagnostics ---
+
+        # Create sequences
+        X = create_sequences(afrr, temp, wind, timestamps)
+
+        # Save to file
+        if X.size > 0:
+            np.save("data/X.npy", X)
+            print(f"\nSaved {len(X)} sequences to data/X.npy")
+        else:
+             print("\nNo sequences were created.")
