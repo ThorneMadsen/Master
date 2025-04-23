@@ -265,4 +265,164 @@ def generate_samples(model, cond, num_samples, device):
             samples.append(sample.unsqueeze(0)) # Add sample dimension
 
     # Concatenate along the sample dimension
-    return torch.cat(samples, dim=0)  # [num_samples, batch_size, seq_len, target_dim] 
+    return torch.cat(samples, dim=0)  # [num_samples, batch_size, seq_len, target_dim]
+
+if __name__ == "__main__":
+    import os
+    import time
+    from torch.utils.data import DataLoader, TensorDataset, random_split
+
+    # Use hardcoded settings from notebook instead of argparse
+    
+    # Model parameters
+    # cond_dim is now calculated dynamically from data (see below)
+    target_dim = 1        # Number of target features per time step
+    latent_dim = 16       # Dimension of latent space
+    seq_len = 24          # Sequence length
+    d_model = 256         # Model dimension
+    nhead = 8             # Number of attention heads
+    num_layers = 3        # Number of transformer layers
+    
+    # Training parameters
+    batch_size = 256      # 2^8 as in notebook
+    epochs = 100
+    lr = 0.001
+    warmup_epochs = 10
+    save_interval = 10
+    
+    # Paths
+    data_path = "data/X2.npy"
+    output_dir = "./results"
+    mode = "train"        # 'train' or 'generate'
+    model_path = None     # Path to load pretrained model
+    num_samples = 10      # Number of samples to generate (for generate mode)
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Load and prepare data
+    print(f"Loading data from {data_path}")
+    X = np.load(data_path)
+    # Update to match MLPVAE indexing:
+    target = X[:, 0, :]     # First channel is the target (vs 4th channel in original)
+    condition = X[:, 1:, :] # Rest are conditions (vs first 3 in original)
+
+    # Permute changes dimensions from (batch, features, time) to (batch, time, features)
+    # This is necessary for transformer which expects sequence data as (batch, sequence_length, features)
+    cond_tensor = torch.tensor(condition, dtype=torch.float32).permute(0, 2, 1)
+    
+    # unsqueeze(-1) adds a feature dimension, converting (batch, time) to (batch, time, 1)
+    # This ensures target has shape (batch, time, 1) which the model expects
+    target_tensor = torch.tensor(target, dtype=torch.float32).unsqueeze(-1)
+    
+    # Update condition dimension to match the actual shape
+    cond_dim = condition.shape[1]  # Now dynamically calculated
+    
+    # Create dataset
+    dataset = TensorDataset(cond_tensor, target_tensor)
+    
+    # Split data
+    n_total = len(dataset)
+    n_train = int(0.8 * n_total)
+    n_val = n_total - n_train
+    train_dataset, val_dataset = random_split(dataset, [n_train, n_val])
+    
+    if mode == 'train':
+        # Create dataloaders
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
+        
+        print(f"Data dimensions - Sequence length: {seq_len}, Condition dim: {cond_dim}, Target dim: {target_dim}")
+        print(f"Dataset size - Total: {n_total}, Train: {n_train}, Validation: {n_val}")
+        
+        # Initialize model
+        model = TransformerCVAE(
+            cond_dim=cond_dim,
+            target_dim=target_dim,
+            latent_dim=latent_dim,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            seq_len=seq_len
+        ).to(device)
+        
+        # Load pretrained model if provided
+        if model_path:
+            print(f"Loading pretrained model from {model_path}")
+            model.load_state_dict(torch.load(model_path, map_location=device))
+        
+        # Initialize optimizer
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        
+        # Training loop
+        print(f"Starting training for {epochs} epochs")
+        start_time = time.time()
+        
+        for epoch in range(1, epochs + 1):
+            # Calculate KL weight with linear annealing
+            kl_weight = calculate_kl_weight(
+                epoch=epoch-1, 
+                total_epochs=epochs,
+                warmup_epochs=warmup_epochs,
+                min_weight=0.0,
+                max_weight=1.0,
+                schedule_type='linear'
+            )
+            
+            # Train and validate
+            train_loss = train_epoch(model, train_loader, optimizer, device, kl_weight)
+            val_loss = validate(model, val_loader, device, kl_weight)
+            
+            # Print progress
+            print(f"Epoch {epoch}/{epochs} - KL Weight: {kl_weight:.4f} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+            
+            # Save checkpoint
+            if epoch % save_interval == 0 or epoch == epochs:
+                checkpoint_path = os.path.join(output_dir, f"model_epoch_{epoch}.pt")
+                torch.save(model.state_dict(), checkpoint_path)
+                print(f"Saved model checkpoint to {checkpoint_path}")
+        
+        # Save final model
+        final_model_path = os.path.join(output_dir, "model_final.pt")
+        torch.save(model.state_dict(), final_model_path)
+        print(f"Training completed in {time.time() - start_time:.2f}s. Final model saved to {final_model_path}")
+        
+    elif mode == 'generate':
+        # For generation mode, we need a trained model
+        if not model_path:
+            raise ValueError("Model path must be provided for generate mode")
+        
+        # Use a subset for testing
+        test_dataset, _ = random_split(dataset, [100, len(dataset)-100])  # Just use 100 samples for testing
+        test_loader = DataLoader(test_dataset, batch_size=batch_size)
+        
+        # Get the first batch for generation
+        test_cond, _ = next(iter(test_loader))
+        
+        # Initialize model
+        model = TransformerCVAE(
+            cond_dim=cond_dim,
+            target_dim=target_dim,
+            latent_dim=latent_dim,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            seq_len=seq_len
+        ).to(device)
+        
+        # Load trained model
+        print(f"Loading model from {model_path}")
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        
+        # Generate samples
+        print(f"Generating {num_samples} samples for {len(test_cond)} test conditions")
+        samples = generate_samples(model, test_cond, num_samples, device)
+        
+        # Save generated samples
+        samples_path = os.path.join(output_dir, "generated_samples.pt")
+        torch.save(samples, samples_path)
+        print(f"Saved {num_samples} generated samples to {samples_path}") 
