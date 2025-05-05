@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import os
-# import matplotlib.pyplot as plt # Removed as no longer needed
+import matplotlib.pyplot as plt # Added import back
 from TransformerCVAE import TransformerCVAE, generate_samples
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
@@ -160,30 +160,76 @@ def main():
     daily_rel_improvements = []
     daily_crps = []
     daily_pinball_losses = []
-    
+    all_samples_last_week = [] # Store samples for plotting if needed later
+    all_targets_last_week = [] # Store targets for plotting
+
+    # Determine indices for the last 7 days
+    num_val_days = len(val_dataset)
+    last_week_start_idx = max(0, num_val_days - 7)
+
     # Process each day in validation set
     for day_idx, (day_cond, day_target) in enumerate(val_loader):
         if (day_idx + 1) % 20 == 0:
-            print(f"Processing validation day {day_idx+1}/{len(val_dataset)}")
-            
+            print(f"Processing validation day {day_idx+1}/{num_val_days}")
+
         day_cond = day_cond.to(device)
         day_target = day_target.to(device)
-        
+
         # Generate samples for this day
-        samples = generate_samples(model, day_cond, num_samples, device)
-        
+        with torch.no_grad():
+            samples = generate_samples(model, day_cond, num_samples, device) # Shape: [num_samples, batch=1, seq_len, 1]
+
         # Calculate metrics for this day
         improvement_metrics = evaluate_imbalance_improvement(day_target, samples)
         daily_improvements.append(improvement_metrics['improvement_percentage'])
         daily_abs_diffs.append(improvement_metrics['avg_absolute_diff'])
         daily_rel_improvements.append(improvement_metrics['relative_improvement'])
-        
+
         crps = calculate_crps(day_target, samples)
         daily_crps.append(crps)
-        
+
         pinball = calculate_pinball_losses(day_target, samples)
         daily_pinball_losses.append(pinball)
-    
+
+        # --- Output First Sample Prediction ---
+        first_sample_pred = samples[0, :, :, :] # Select the first sample [1, seq_len, 1]
+        first_sample_pred_np = first_sample_pred.squeeze().cpu().numpy() # [seq_len]
+        target_np_for_print = day_target.squeeze().cpu().numpy() # [seq_len]
+        print(f"--- Day {n_train + day_idx} ---")
+        print(f" Target:   {np.round(target_np_for_print, 4)}")
+        print(f" Sample 0: {np.round(first_sample_pred_np, 4)}")
+        # ----------------------------------
+
+        # --- Plotting logic for the last 7 days ---
+        if day_idx >= last_week_start_idx:
+            # Calculate 95th percentile of absolute predictions
+            abs_samples = torch.abs(samples) # [num_samples, 1, seq_len, 1]
+            conservative_pred = torch.quantile(abs_samples, 0.95, dim=0) # [1, seq_len, 1]
+
+            # Prepare data for plotting
+            target_np = day_target.squeeze().cpu().numpy() # [seq_len]
+            pred_95_np = conservative_pred.squeeze().cpu().numpy() # [seq_len]
+            hours = range(seq_len) # Typically 0-23
+
+            # Create plot
+            plt.figure(figsize=(12, 6))
+            plt.plot(hours, target_np, label='Actual Imbalance', marker='o', linestyle='-')
+            plt.plot(hours, pred_95_np, label='Predicted 95th Percentile (Absolute)', marker='x', linestyle='--')
+            plt.xlabel('Hour of Day')
+            plt.ylabel('Imbalance Value')
+            # Use the absolute index in the original dataset for title
+            original_day_index = n_train + day_idx
+            plt.title(f'Validation Day {original_day_index}: Actual vs. Predicted 95th Percentile')
+            plt.legend()
+            plt.grid(True)
+            plt.xticks(hours) # Ensure all hours are marked
+
+            # Save plot
+            plot_filename = os.path.join(output_dir, f'validation_day_{original_day_index}_plot.png')
+            plt.savefig(plot_filename)
+            plt.close() # Close the figure to free memory
+        # -------------------------------------------
+
     # Calculate overall metrics for the entire validation set
     avg_improvement = np.mean(daily_improvements)
     avg_abs_diff = np.mean(daily_abs_diffs)
@@ -264,6 +310,7 @@ def main():
     np.save(os.path.join(output_dir, "validation_metrics.npy"), results)
     
     print(f"\nEvaluation complete. Results saved to {output_dir}")
+    print(f"Plots for the last {min(7, num_val_days)} validation days saved in {output_dir}") # Added info about plots
 
 if __name__ == "__main__":
     main() 

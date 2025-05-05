@@ -48,10 +48,11 @@ class TransformerEncoder(nn.Module):
         x = self.pos_encoder(x)
         x = self.transformer(x)
         
-        x_agg = x.mean(dim=1)
+        # Use the output of the last time step instead of the mean
+        last_step_output = x[:, -1, :] # Shape: [batch_size, d_model]
         
-        mu = self.fc_mu(x_agg)
-        logvar = self.fc_logvar(x_agg)
+        mu = self.fc_mu(last_step_output)
+        logvar = self.fc_logvar(last_step_output)
         return mu, logvar
 
 class TransformerDecoder(nn.Module):
@@ -93,23 +94,30 @@ class TransformerDecoder(nn.Module):
         # cond_seq shape: [batch_size, seq_len, cond_dim]
         # z shape: [batch_size, latent_dim]
 
-        # 1. Encode the condition sequence to create memory
-        memory = self.cond_embedding(cond_seq) # [batch_size, seq_len, d_model]
-        memory = self.cond_pos_encoder(memory)
-        memory = self.memory_transformer(memory) # [batch_size, seq_len, d_model]
+        # 1. Embed and positionally encode the condition sequence
+        cond_embedded = self.cond_embedding(cond_seq) # [batch_size, seq_len, d_model]
+        cond_embedded_pos = self.cond_pos_encoder(cond_embedded)
+        
+        # 2. Process condition sequence through its own transformer to create context (memory)
+        memory = self.memory_transformer(cond_embedded_pos) # [batch_size, seq_len, d_model]
 
-        # 2. Prepare the target input sequence for the decoder
-        # Project z and repeat it for each position in the sequence
+        # 3. Project z and combine it with the memory
         z_projected = self.z_proj(z) # [batch_size, d_model]
-        # Unsqueeze and repeat z to match sequence length
-        tgt_seq = z_projected.unsqueeze(1).repeat(1, self.seq_len, 1) # [batch_size, seq_len, d_model]
-        tgt_seq = self.decoder_pos_encoder(tgt_seq) # Add positional encoding
+        z_expanded = z_projected.unsqueeze(1) # [batch_size, 1, d_model]
+        # Add z to each time step's memory vector via broadcasting
+        memory_with_z = memory + z_expanded 
 
-        # 3. Pass through transformer decoder
-        # The decoder expects target sequence (tgt) and memory
-        output = self.transformer(tgt=tgt_seq, memory=memory) # [batch_size, seq_len, d_model]
+        # 4. Prepare the target input sequence for the main decoder
+        # Use the initially embedded & positionally encoded conditions as the input sequence `tgt`
+        # The decoder's task is to transform this input using the z-infused memory
+        tgt_input = cond_embedded_pos 
+        # Note: Removed self.decoder_pos_encoder as cond_embedded_pos already has pos encoding
 
-        # 4. Project to target dimension
+        # 5. Pass through transformer decoder
+        # Use the condition-based sequence as `tgt` and the z-infused context as `memory`
+        output = self.transformer(tgt=tgt_input, memory=memory_with_z) # [batch_size, seq_len, d_model]
+
+        # 6. Project to target dimension
         out = self.output_proj(output) # [batch_size, seq_len, target_dim]
         return out
 
