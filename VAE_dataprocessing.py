@@ -135,21 +135,27 @@ def load_and_process_data():
     )
 
 def load_and_process_imbalance_data():
-    """Load and process Imbalance and DMI data, returning aligned feature arrays."""
+    """Load and process Imbalance, DMI, and ElSpot data, returning aligned feature arrays."""
     imbalance_df = pd.read_csv("data/imbalance_dk2_nov2022_march2025.csv")
     dmi_df = pd.read_csv("data/DMI_data.csv")
+    elspot_df = pd.read_csv("data/ElSpotPrices_dk2.csv")
 
     imbalance_df['timestamp'] = pd.to_datetime(imbalance_df['HourUTC'], utc=True)
     imbalance_df = imbalance_df[['timestamp', 'ImbalanceMWh']]
 
     dmi_df['timestamp'] = pd.to_datetime(dmi_df.iloc[:, 0], utc=True)
 
+    # Process ElSpot data
+    elspot_df['timestamp'] = pd.to_datetime(elspot_df['HourUTC'], utc=True)
+    elspot_df = elspot_df[['timestamp', 'SpotPriceEUR']]
+
     required_dmi_cols = ['timestamp', 'mean_temp', 'mean_wind_speed', 'wind_dir_sin', 'wind_dir_cos']
     if not all(col in dmi_df.columns for col in required_dmi_cols):
         missing_cols = [col for col in required_dmi_cols if col not in dmi_df.columns]
         print(f"Error: Missing required DMI columns: {missing_cols}. Cannot proceed.")
-        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
+        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
 
+    # Merge imbalance with DMI
     merged_df = pd.merge(
         imbalance_df,
         dmi_df[required_dmi_cols],
@@ -157,9 +163,17 @@ def load_and_process_imbalance_data():
         how='inner'
     )
 
+    # Merge with ElSpot data
+    merged_df = pd.merge(
+        merged_df,
+        elspot_df,
+        on='timestamp',
+        how='inner'
+    )
+
     if merged_df.empty:
-        print("Warning: Merged imbalance/DMI dataframe is empty after inner join.")
-        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
+        print("Warning: Merged imbalance/DMI/ElSpot dataframe is empty after inner join(s).")
+        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
 
     merged_df = merged_df.sort_values('timestamp')
 
@@ -167,7 +181,7 @@ def load_and_process_imbalance_data():
     full_range = pd.date_range(start=merged_df['timestamp'].min(), end=merged_df['timestamp'].max(), freq='H', tz='UTC')
     merged_df = merged_df.set_index('timestamp')
     merged_df = merged_df.reindex(full_range)
-    cols_to_fill = ['ImbalanceMWh', 'mean_temp', 'mean_wind_speed', 'wind_dir_sin', 'wind_dir_cos']
+    cols_to_fill = ['ImbalanceMWh', 'mean_temp', 'mean_wind_speed', 'wind_dir_sin', 'wind_dir_cos', 'SpotPriceEUR']
     merged_df[cols_to_fill] = merged_df[cols_to_fill].fillna(method='ffill').fillna(method='bfill')
     merged_df = merged_df.reset_index().rename(columns={'index': 'timestamp'})
     # --- End Gap Filling ---
@@ -175,7 +189,7 @@ def load_and_process_imbalance_data():
     first_midnight_index = merged_df[merged_df['timestamp'].dt.hour == 0].index.min()
     if pd.isna(first_midnight_index):
         print("Error: No midnight timestamp found in merged imbalance data after processing. Cannot proceed.")
-        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
+        return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
 
     merged_df = merged_df.loc[first_midnight_index:].reset_index(drop=True)
 
@@ -184,7 +198,7 @@ def load_and_process_imbalance_data():
     rows_to_keep = num_full_days * 24
     if rows_to_keep == 0:
          print("Warning: Not enough data for a full 24-hour sequence after filtering.")
-         return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
+         return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
     if rows_to_keep < len(merged_df):
         merged_df = merged_df.iloc[:rows_to_keep]
     # --- End Truncation ---
@@ -195,10 +209,11 @@ def load_and_process_imbalance_data():
         merged_df['mean_wind_speed'].values,
         merged_df['wind_dir_sin'].values,
         merged_df['wind_dir_cos'].values,
+        merged_df['SpotPriceEUR'].values,
         merged_df['timestamp']
     )
 
-def create_sequences(feature1, temp, wind_speed, wind_dir_sin, wind_dir_cos, timestamps, seq_length=24):
+def create_sequences(feature1, temp, wind_speed, wind_dir_sin, wind_dir_cos, spot_price_eur, timestamps, seq_length=24):
     """Create 24-hour sequences with features plus day sin/cos and week sin/cos."""
     X = []
     total_length = len(feature1)
@@ -224,6 +239,7 @@ def create_sequences(feature1, temp, wind_speed, wind_dir_sin, wind_dir_cos, tim
             wind_speed[i:i+seq_length],
             wind_dir_sin[i:i+seq_length],
             wind_dir_cos[i:i+seq_length],
+            spot_price_eur[i:i+seq_length],
             np.full(seq_length, np.sin(day_angle)),
             np.full(seq_length, np.cos(day_angle)),
             np.full(seq_length, np.sin(week_angle)), # Add day of week sin
@@ -264,7 +280,7 @@ if __name__ == "__main__":
 
     # ---- Process Imbalance Data for X2 ----
     print("\n--- Processing Imbalance Data for X2 ---")
-    imbalance, imb_temp, imb_wind_speed, imb_wind_dir_sin, imb_wind_dir_cos, imb_timestamps = load_and_process_imbalance_data()
+    imbalance, imb_temp, imb_wind_speed, imb_wind_dir_sin, imb_wind_dir_cos, imb_spot_price_eur, imb_timestamps = load_and_process_imbalance_data()
 
     if imb_timestamps.size == 0:
         print("Imbalance processing resulted in empty data. Cannot create sequences for X2.")
@@ -273,7 +289,7 @@ if __name__ == "__main__":
              print(f"Warning: Imbalance data length ({len(imb_timestamps)}) not divisible by 24 after processing. Cannot create sequences correctly.")
         else:
             print(f"Processed {len(imb_timestamps)} hours of imbalance data.")
-            X2 = create_sequences(imbalance, imb_temp, imb_wind_speed, imb_wind_dir_sin, imb_wind_dir_cos, imb_timestamps)
+            X2 = create_sequences(imbalance, imb_temp, imb_wind_speed, imb_wind_dir_sin, imb_wind_dir_cos, imb_spot_price_eur, imb_timestamps)
 
             if X2.size == 0:
                 print("Warning: create_sequences returned an empty array for X2.")
@@ -282,9 +298,14 @@ if __name__ == "__main__":
                 print(X2[-3:, 0, :]) # Print imbalance from the last 3 sequences
 
                 X2[:, 0, :] /= 1000.0 # Convert imbalance feature from MW to GW
+                print("\nSpotPriceEUR before scaling (from last 3 sequences, 6th feature - index 5):")
+                print(X2[-3:, 5, :]) 
+                X2[:, 5, :] /= 100.0 # Scale SpotPriceEUR
+                print("\nSpotPriceEUR after scaling by 100 (from last 3 sequences, 6th feature - index 5):")
+                print(X2[-3:, 5, :]) 
 
                 if np.isnan(X2).any():
                     print("\nWarning: NaNs found in final X2 sequences. Check input data and gap filling.")
                 else:
                     np.save("data/X2.npy", X2)
-                    print(f"\nSaved {len(X2)} sequences to data/X2.npy. Shape: {X2.shape}") # Shape should be (num_sequences, 9, 24)
+                    print(f"\nSaved {len(X2)} sequences to data/X2.npy. Shape: {X2.shape}") # Shape should be (num_sequences, 10, 24)
