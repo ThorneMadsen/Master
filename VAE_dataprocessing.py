@@ -2,8 +2,6 @@ import numpy as np
 import pandas as pd
 
 def combine_mfrr_data(file_path_2021_2023: str, file_path_2023_2025: str) -> pd.DataFrame:
-    """Combines two mFRR reserve datasets, prioritizing the newer data for overlaps."""
-    # Define columns to use and renaming for the second dataset
     cols_2021 = ['HourUTC', 'mFRR_DownPurchased', 'mFRR_UpPurchased']
     cols_2023_select = ['HourUTC', 'mFRRDownActBal', 'mFRRUpActBal']
     cols_2023_rename = {
@@ -11,7 +9,6 @@ def combine_mfrr_data(file_path_2021_2023: str, file_path_2023_2025: str) -> pd.
         'mFRRUpActBal': 'mFRR_UpPurchased'
     }
 
-    # Load the first dataset
     try:
         df1 = pd.read_csv(file_path_2021_2023, usecols=cols_2021, parse_dates=['HourUTC'])
     except FileNotFoundError:
@@ -67,8 +64,6 @@ def combine_mfrr_data(file_path_2021_2023: str, file_path_2023_2025: str) -> pd.
 
 
 def load_and_process_data():
-    """Load and process aFRR and DMI data, returning aligned feature arrays."""
-    # Load data
     afrr_df = pd.read_csv("data/afrr_activated_dk2_2023_today.csv")
     dmi_df = pd.read_csv("data/DMI_data.csv")
     
@@ -92,7 +87,6 @@ def load_and_process_data():
     # Sort 
     merged_df = merged_df.sort_values('timestamp')
 
-    # --- Fill Gaps ---
     if not merged_df.empty:
         print(f"\nData before gap filling - Min: {merged_df['timestamp'].min()}, Max: {merged_df['timestamp'].max()}, Length: {len(merged_df)}")
         # Create a full hourly range
@@ -106,27 +100,22 @@ def load_and_process_data():
         # Reset index to get timestamp column back
         merged_df = merged_df.reset_index().rename(columns={'index': 'timestamp'})
         print(f"Data after gap filling - Min: {merged_df['timestamp'].min()}, Max: {merged_df['timestamp'].max()}, Length: {len(merged_df)}")
-    # --- End Gap Filling ---
 
     # Ensure data starts exactly at midnight UTC
     first_midnight_index = merged_df[merged_df['timestamp'].dt.hour == 0].index.min()
     if pd.isna(first_midnight_index):
         print("Error: No midnight timestamp found in merged data. Cannot proceed.")
-        # Return empty arrays to prevent errors later
         return np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
     
     merged_df = merged_df.loc[first_midnight_index:].reset_index(drop=True)
     print(f"Filtered merged data to start from first midnight ({merged_df.iloc[0]['timestamp']}). New shape: {merged_df.shape}")
 
-    # --- Truncate to full days ---
     num_full_days = len(merged_df) // 24
     rows_to_keep = num_full_days * 24
     if rows_to_keep < len(merged_df):
         merged_df = merged_df.iloc[:rows_to_keep]
         print(f"Truncated data to {rows_to_keep} rows ({num_full_days} full days). Last timestamp: {merged_df.iloc[-1]['timestamp']}")
-    # --- End Truncation ---
 
-    # Extract arrays
     return (
         merged_df['aFRR_Net_Quantity_MW'].values,
         merged_df['mean_temp'].values,
@@ -135,7 +124,6 @@ def load_and_process_data():
     )
 
 def load_and_process_imbalance_data():
-    """Load and process Imbalance, DMI, and ElSpot data, returning aligned feature arrays."""
     imbalance_df = pd.read_csv("data/imbalance_dk2_nov2022_march2025.csv")
     dmi_df = pd.read_csv("data/DMI_data.csv")
     elspot_df = pd.read_csv("data/ElSpotPrices_dk2.csv")
@@ -145,7 +133,6 @@ def load_and_process_imbalance_data():
 
     dmi_df['timestamp'] = pd.to_datetime(dmi_df.iloc[:, 0], utc=True)
 
-    # Process ElSpot data
     elspot_df['timestamp'] = pd.to_datetime(elspot_df['HourUTC'], utc=True)
     elspot_df = elspot_df[['timestamp', 'SpotPriceEUR']]
 
@@ -155,7 +142,6 @@ def load_and_process_imbalance_data():
         print(f"Error: Missing required DMI columns: {missing_cols}. Cannot proceed.")
         return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
 
-    # Merge imbalance with DMI
     merged_df = pd.merge(
         imbalance_df,
         dmi_df[required_dmi_cols],
@@ -163,7 +149,6 @@ def load_and_process_imbalance_data():
         how='inner'
     )
 
-    # Merge with ElSpot data
     merged_df = pd.merge(
         merged_df,
         elspot_df,
@@ -177,14 +162,12 @@ def load_and_process_imbalance_data():
 
     merged_df = merged_df.sort_values('timestamp')
 
-    # --- Fill Gaps ---
     full_range = pd.date_range(start=merged_df['timestamp'].min(), end=merged_df['timestamp'].max(), freq='H', tz='UTC')
     merged_df = merged_df.set_index('timestamp')
     merged_df = merged_df.reindex(full_range)
     cols_to_fill = ['ImbalanceMWh', 'mean_temp', 'mean_wind_speed', 'wind_dir_sin', 'wind_dir_cos', 'SpotPriceEUR']
     merged_df[cols_to_fill] = merged_df[cols_to_fill].fillna(method='ffill').fillna(method='bfill')
     merged_df = merged_df.reset_index().rename(columns={'index': 'timestamp'})
-    # --- End Gap Filling ---
 
     first_midnight_index = merged_df[merged_df['timestamp'].dt.hour == 0].index.min()
     if pd.isna(first_midnight_index):
@@ -193,7 +176,6 @@ def load_and_process_imbalance_data():
 
     merged_df = merged_df.loc[first_midnight_index:].reset_index(drop=True)
 
-    # --- Truncate to full days ---
     num_full_days = len(merged_df) // 24
     rows_to_keep = num_full_days * 24
     if rows_to_keep == 0:
@@ -201,7 +183,6 @@ def load_and_process_imbalance_data():
          return np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), np.array([]), pd.Series([], dtype='datetime64[ns, UTC]')
     if rows_to_keep < len(merged_df):
         merged_df = merged_df.iloc[:rows_to_keep]
-    # --- End Truncation ---
 
     return (
         merged_df['ImbalanceMWh'].values,
@@ -242,8 +223,8 @@ def create_sequences(feature1, temp, wind_speed, wind_dir_sin, wind_dir_cos, spo
             spot_price_eur[i:i+seq_length],
             np.full(seq_length, np.sin(day_angle)),
             np.full(seq_length, np.cos(day_angle)),
-            np.full(seq_length, np.sin(week_angle)), # Add day of week sin
-            np.full(seq_length, np.cos(week_angle))  # Add day of week cos
+            np.full(seq_length, np.sin(week_angle)),
+            np.full(seq_length, np.cos(week_angle))
         ], axis=0)
         X.append(X_seq)
 
@@ -295,7 +276,7 @@ if __name__ == "__main__":
                 print("Warning: create_sequences returned an empty array for X2.")
             else:
                 print("\nTail of Imbalance feature (X2[:, 0, :]) before GW conversion:")
-                print(X2[-3:, 0, :]) # Print imbalance from the last 3 sequences
+                print(X2[-3:, 0, :])
 
                 X2[:, 0, :] /= 1000.0 # Convert imbalance feature from MW to GW
                 print("\nSpotPriceEUR before scaling (from last 3 sequences, 6th feature - index 5):")
@@ -308,4 +289,4 @@ if __name__ == "__main__":
                     print("\nWarning: NaNs found in final X2 sequences. Check input data and gap filling.")
                 else:
                     np.save("data/X2.npy", X2)
-                    print(f"\nSaved {len(X2)} sequences to data/X2.npy. Shape: {X2.shape}") # Shape should be (num_sequences, 10, 24)
+                    print(f"\nSaved {len(X2)} sequences to data/X2.npy. Shape: {X2.shape}")
