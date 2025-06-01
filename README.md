@@ -74,13 +74,13 @@ batch_size = 64          # Batch size
 num_epochs = 2000        # Training epochs
 ```
 
-#### Training the Model
+# Training the Model
 
-# Initialize model
+#### Initialize model
 model = CVAE(cond_dim, target_dim, latent_dim, mlp_blocks=4, hidden_dim=48, dropout_prob=0.4)
 
 
-### 3. Model Evaluation
+### Model Evaluation
 
 The notebook includes comprehensive evaluation metrics:
 
@@ -94,5 +94,5 @@ The notebook includes comprehensive evaluation metrics:
 - `plot_percentile_accuracy()`: Evaluate percentile prediction accuracy
 - `plot_masking_impact()`: Analyze impact of partial information
 
-# Calculate average performance metrics
+#### Calculate average performance metrics
 results = calculate_average_metrics(model, X, val_dataset, latent_dim, num_samples=1000)
