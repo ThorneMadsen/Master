@@ -13,14 +13,14 @@ The MLPVAE model is designed to predict energy imbalance patterns using conditio
 Make sure you have Python 3.7+ installed. Install the required packages:
 
 ### Required Packages:
-- `torch` - PyTorch for deep learning
-- `numpy` - Numerical computations
-- `pandas` - Data manipulation
-- `seaborn` - Statistical plotting
-- `matplotlib` - Plotting
-- `plotly` - Interactive plotting
-- `jupyter` - Jupyter notebook support
-- `scipy` - Scientific computing
+- `torch`
+- `numpy`
+- `pandas`
+- `seaborn`
+- `matplotlib`
+- `plotly`
+- `jupyter`
+- `scipy`
 
 ## Data Requirements
 
